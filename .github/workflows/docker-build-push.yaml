@@ -50,7 +50,7 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
-          image: us-east4-docker.pkg.dev/datajet-platform/datajet-prod-proxy/tonistiigi/binfmt:latest
+          image: us-east4-docker.pkg.dev/datajet-platform/docker-proxy/tonistiigi/binfmt:latest
       
       - name: Extract metadata for Server
         id: meta-server
