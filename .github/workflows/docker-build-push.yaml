@@ -6,6 +6,10 @@ on:
   pull_request:
     branches:
       - "main"
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
 env:
   SERVER_IMAGE: us-east4-docker.pkg.dev/datajet-platform/datajet-platform-useast4-docker-gcr/opensearch-k8s-operator
 
