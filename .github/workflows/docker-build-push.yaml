@@ -12,7 +12,10 @@ env:
 jobs:
   docker-build-push:
     runs-on: dj-arc-runner-set-k8s
-    name: Docker Build
+    container:
+      image: us-east4-docker.pkg.dev/datajet-platform/datajet-platform-useast4-docker-gcr/go-lang-ci:latest
+      options: --pull=missing
+    name: Docker Build Push
     steps:
       - name: Checkout
         uses: actions/checkout@v4
