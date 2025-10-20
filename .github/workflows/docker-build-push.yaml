@@ -42,14 +42,15 @@ jobs:
         run: |
           echo "GOOGLE_APPLICATION_CREDENTIALS: $GOOGLE_APPLICATION_CREDENTIALS"
           gcloud info
+          gcloud auth configure-docker us-east4-docker.pkg.dev
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
           image: us-east4-docker.pkg.dev/datajet-platform/datajet-prod-proxy/tonistiigi/binfmt:latest
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
       
       - name: Extract metadata for Server
         id: meta-server
