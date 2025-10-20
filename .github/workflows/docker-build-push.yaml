@@ -13,7 +13,7 @@ jobs:
   docker-build-push:
     runs-on: dj-arc-runner-set
     container:
-      image: ubuntu:latest
+      image: us-east4-docker.pkg.dev/datajet-platform/datajet-platform-useast4-docker-gcr/go-lang-ci:latest
       options: --pull=missing
     name: Docker Build Push
     steps:
