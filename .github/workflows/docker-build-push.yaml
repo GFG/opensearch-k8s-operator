@@ -11,7 +11,7 @@ env:
 
 jobs:
   docker-build-push:
-    runs-on: dj-arc-runner-set
+    runs-on: dj-arc-runner-set-k8s
     name: Docker Build
     steps:
       - name: Checkout
