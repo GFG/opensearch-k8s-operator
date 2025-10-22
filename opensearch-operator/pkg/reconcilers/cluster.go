@@ -244,8 +244,8 @@ func (r *ClusterReconciler) reconcileNodeStatefulSet(nodePool opsterv1.NodePool,
 					}
 					// STS will be recreated by the normal code below
 				} else {
-					// Still in recovery, just requeue with delay
-					return &ctrl.Result{RequeueAfter: time.Minute * 1}, nil
+					// Still in recovery, just requeue
+					return &ctrl.Result{Requeue: true}, err
 				}
 			}
 		}
