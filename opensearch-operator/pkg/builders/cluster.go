@@ -352,9 +352,20 @@ func NewSTSForNodePool(
 	podSecurityContext := cr.Spec.General.PodSecurityContext
 	securityContext := cr.Spec.General.SecurityContext
 
-	var persistentVolumeClaimRetentionPolicy *appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy
+	// Set default PersistentVolumeClaimRetentionPolicy with WhenScaled = Delete
+	persistentVolumeClaimRetentionPolicy := &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+		WhenScaled: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
+	}
+	
+	// Override with user-provided policy if present
 	if cr.Spec.General.PersistentVolumeClaimRetentionPolicy != nil {
-		persistentVolumeClaimRetentionPolicy = cr.Spec.General.PersistentVolumeClaimRetentionPolicy
+		userPolicy := cr.Spec.General.PersistentVolumeClaimRetentionPolicy
+		persistentVolumeClaimRetentionPolicy = userPolicy
+		
+		// If user didn't specify WhenScaled, set default to Delete
+		if userPolicy.WhenScaled == "" {
+			persistentVolumeClaimRetentionPolicy.WhenScaled = appsv1.DeletePersistentVolumeClaimRetentionPolicyType
+		}
 	}
 
 	var initContainers []corev1.Container
