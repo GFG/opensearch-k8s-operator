@@ -235,7 +235,7 @@ func (r *ClusterReconciler) reconcileNodeStatefulSet(nodePool opsterv1.NodePool,
 				}
 			} else if existing.Spec.PodManagementPolicy == appsv1.ParallelPodManagement {
 				// Only exit recovery mode if the cluster is actually healthy
-				if existing.Status.ReadyReplicas >= nodePool.Replicas-1 && 
+				if existing.Status.ReadyReplicas >= nodePool.Replicas-1 &&
 					existing.Status.ReadyReplicas > 0 {
 					r.logger.Info(fmt.Sprintf("Ending recovery mode for nodepool %s", nodePool.Component))
 					if err := helpers.WaitForSTSDelete(r.client, &existing); err != nil {
