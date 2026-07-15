@@ -3,22 +3,28 @@ package util
 import (
 	"context"
 	"crypto/sha1"
+	cryptotls "crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
-	"k8s.io/utils/ptr"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
-	opsterv1 "github.com/Opster/opensearch-k8s-operator/opensearch-operator/api/v1"
-	"github.com/Opster/opensearch-k8s-operator/opensearch-operator/opensearch-gateway/services"
-	"github.com/Opster/opensearch-k8s-operator/opensearch-operator/pkg/builders"
-	"github.com/Opster/opensearch-k8s-operator/opensearch-operator/pkg/helpers"
-	"github.com/Opster/opensearch-k8s-operator/opensearch-operator/pkg/reconcilers/k8s"
-	"github.com/Opster/opensearch-k8s-operator/opensearch-operator/pkg/tls"
+	"github.com/opensearch-project/opensearch-k8s-operator/opensearch-operator/opensearch-gateway/responses"
+	"k8s.io/utils/ptr"
+
 	"github.com/go-logr/logr"
+	opensearchv1 "github.com/opensearch-project/opensearch-k8s-operator/opensearch-operator/api/opensearch.org/v1"
+	"github.com/opensearch-project/opensearch-k8s-operator/opensearch-operator/opensearch-gateway/services"
+	"github.com/opensearch-project/opensearch-k8s-operator/opensearch-operator/pkg/builders"
+	"github.com/opensearch-project/opensearch-k8s-operator/opensearch-operator/pkg/helpers"
+	"github.com/opensearch-project/opensearch-k8s-operator/opensearch-operator/pkg/reconcilers/k8s"
+	"github.com/opensearch-project/opensearch-k8s-operator/opensearch-operator/pkg/tls"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -58,7 +64,7 @@ func CheckEquels(from_env *appsv1.StatefulSetSpec, from_crd *appsv1.StatefulSetS
 	}
 }
 
-func ReadOrGenerateCaCert(pki tls.PKI, k8sClient k8s.K8sClient, instance *opsterv1.OpenSearchCluster) (tls.Cert, error) {
+func ReadOrGenerateCaCert(pki tls.PKI, k8sClient k8s.K8sClient, instance *opensearchv1.OpenSearchCluster) (tls.Cert, error) {
 	namespace := instance.Namespace
 	clusterName := instance.Name
 	secretName := clusterName + "-ca"
@@ -89,7 +95,7 @@ func ReadOrGenerateCaCert(pki tls.PKI, k8sClient k8s.K8sClient, instance *opster
 func CreateAdditionalVolumes(
 	k8sClient k8s.K8sClient,
 	namespace string,
-	volumeConfigs []opsterv1.AdditionalVolume,
+	volumeConfigs []opensearchv1.AdditionalVolume,
 ) (
 	retVolumes []corev1.Volume,
 	retVolumeMounts []corev1.VolumeMount,
@@ -138,11 +144,37 @@ func CreateAdditionalVolumes(
 				},
 			})
 		}
+		if volumeConfig.PersistentVolumeClaim != nil {
+			readOnly = volumeConfig.PersistentVolumeClaim.ReadOnly
+			retVolumes = append(retVolumes, corev1.Volume{
+				Name: volumeConfig.Name,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: volumeConfig.PersistentVolumeClaim,
+				},
+			})
+		}
 		if volumeConfig.Projected != nil {
 			retVolumes = append(retVolumes, corev1.Volume{
 				Name: volumeConfig.Name,
 				VolumeSource: corev1.VolumeSource{
 					Projected: volumeConfig.Projected,
+				},
+			})
+		}
+		if volumeConfig.NFS != nil {
+			retVolumes = append(retVolumes, corev1.Volume{
+				Name: volumeConfig.Name,
+				VolumeSource: corev1.VolumeSource{
+					NFS: volumeConfig.NFS,
+				},
+			})
+		}
+		if volumeConfig.HostPath != nil {
+			readOnly = false
+			retVolumes = append(retVolumes, corev1.Volume{
+				Name: volumeConfig.Name,
+				VolumeSource: corev1.VolumeSource{
+					HostPath: volumeConfig.HostPath,
 				},
 			})
 		}
@@ -152,7 +184,7 @@ func CreateAdditionalVolumes(
 		}
 
 		subPath := ""
-		// SubPaths are only supported for ConfigMaps, Secrets and CSI volumes
+		// SubPaths are only supported for ConfigMaps, Secrets, CSI and Projected volumes
 		if volumeConfig.ConfigMap != nil || volumeConfig.Secret != nil || volumeConfig.CSI != nil || volumeConfig.Projected != nil {
 			subPath = strings.TrimSpace(volumeConfig.SubPath)
 		}
@@ -214,54 +246,110 @@ func CreateAdditionalVolumes(
 	return
 }
 
-func OpensearchClusterURL(cluster *opsterv1.OpenSearchCluster) string {
-	return fmt.Sprintf(
-		"https://%s.%s.svc.%s:%v",
-		cluster.Spec.General.ServiceName,
-		cluster.Namespace,
-		helpers.ClusterDnsBase(),
-		cluster.Spec.General.HttpPort,
-	)
+func OpensearchClusterURL(cluster *opensearchv1.OpenSearchCluster) string {
+	return helpers.ClusterURL(cluster)
 }
 
 func CreateClientForCluster(
 	k8sClient k8s.K8sClient,
 	ctx context.Context,
-	cluster *opsterv1.OpenSearchCluster,
+	cluster *opensearchv1.OpenSearchCluster,
 	transport http.RoundTripper,
 ) (*services.OsClusterClient, error) {
 	lg := log.FromContext(ctx)
-	var osClient *services.OsClusterClient
 
-	username, password, err := helpers.UsernameAndPassword(k8sClient, cluster)
+	opts := []services.OsClusterClientOption{}
+	username := ""
+	password := ""
+
+	tlsCfg, err := loadOperatorClientTLSConfig(k8sClient, cluster)
 	if err != nil {
-		lg.Error(err, "failed to fetch opensearch credentials")
+		lg.Error(err, "failed to load operator client TLS config")
 		return nil, err
 	}
 
-	if transport == nil {
-		osClient, err = services.NewOsClusterClient(
-			OpensearchClusterURL(cluster),
-			username,
-			password,
-		)
+	if tlsCfg != nil {
+		// mTLS: authenticate via client cert, do not send basic-auth credentials.
+		opts = append(opts, services.WithTLSConfig(tlsCfg))
 	} else {
-		osClient, err = services.NewOsClusterClient(
-			OpensearchClusterURL(cluster),
-			username,
-			password,
-			services.WithTransport(transport),
-		)
+		username, password, err = helpers.UsernameAndPassword(k8sClient, cluster)
+		if err != nil {
+			lg.Error(err, "failed to fetch opensearch credentials")
+			return nil, err
+		}
 	}
 
-	return osClient, err
+	if transport != nil {
+		// Explicit transport overrides any TLS config we built.
+		opts = append(opts, services.WithTransport(transport))
+	}
+
+	return services.NewOsClusterClient(
+		OpensearchClusterURL(cluster),
+		username,
+		password,
+		opts...,
+	)
+}
+
+// loadOperatorClientTLSConfig returns a TLS config configured with a client
+// certificate (and optional CA bundle) loaded from the secret referenced by
+// cluster.Spec.Security.Config.OperatorClientCert. Returns nil, nil when no
+// such secret is configured.
+func loadOperatorClientTLSConfig(k8sClient k8s.K8sClient, cluster *opensearchv1.OpenSearchCluster) (*cryptotls.Config, error) {
+	if cluster.Spec.Security == nil ||
+		cluster.Spec.Security.Config == nil ||
+		cluster.Spec.Security.Config.OperatorClientCert.Name == "" {
+		return nil, nil
+	}
+
+	secretName := cluster.Spec.Security.Config.OperatorClientCert.Name
+	secret, err := k8sClient.GetSecret(secretName, cluster.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get operator client cert secret %s/%s: %w", cluster.Namespace, secretName, err)
+	}
+
+	certPEM, ok := secret.Data[corev1.TLSCertKey]
+	if !ok || len(certPEM) == 0 {
+		return nil, fmt.Errorf("operator client cert secret %s/%s is missing %q", cluster.Namespace, secretName, corev1.TLSCertKey)
+	}
+	keyPEM, ok := secret.Data[corev1.TLSPrivateKeyKey]
+	if !ok || len(keyPEM) == 0 {
+		return nil, fmt.Errorf("operator client cert secret %s/%s is missing %q", cluster.Namespace, secretName, corev1.TLSPrivateKeyKey)
+	}
+
+	cert, err := cryptotls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("invalid operator client cert in secret %s/%s: %w", cluster.Namespace, secretName, err)
+	}
+
+	tlsCfg := &cryptotls.Config{
+		Certificates: []cryptotls.Certificate{cert},
+	}
+
+	if name := cluster.Spec.Security.Config.OperatorClientServerName; name != "" {
+		tlsCfg.ServerName = name
+	}
+
+	if caPEM, ok := secret.Data[corev1.ServiceAccountRootCAKey]; ok && len(caPEM) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("operator client cert secret %s/%s contains an invalid %q", cluster.Namespace, secretName, corev1.ServiceAccountRootCAKey)
+		}
+		tlsCfg.RootCAs = pool
+	} else {
+		// No CA provided: preserve historical behavior of skipping verification.
+		tlsCfg.InsecureSkipVerify = true
+	}
+
+	return tlsCfg, nil
 }
 
 func FetchOpensearchCluster(
 	k8sClient k8s.K8sClient,
 	ctx context.Context,
 	ref types.NamespacedName,
-) (*opsterv1.OpenSearchCluster, error) {
+) (*opensearchv1.OpenSearchCluster, error) {
 	cluster, err := k8sClient.GetOpenSearchCluster(ref.Name, ref.Namespace)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
@@ -283,7 +371,7 @@ func GetSha1Sum(data []byte) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func DataNodesCount(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) int32 {
+func DataNodesCount(k8sClient k8s.K8sClient, cr *opensearchv1.OpenSearchCluster) int32 {
 	count := int32(0)
 	for _, nodePool := range cr.Spec.NodePools {
 		if helpers.HasDataRole(&nodePool) {
@@ -297,24 +385,25 @@ func DataNodesCount(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) int
 }
 
 // GetClusterHealth returns the health of OpenSearch cluster
-func GetClusterHealth(k8sClient k8s.K8sClient, ctx context.Context, cluster *opsterv1.OpenSearchCluster, lg logr.Logger) opsterv1.OpenSearchHealth {
+func GetClusterHealth(k8sClient k8s.K8sClient, ctx context.Context, cluster *opensearchv1.OpenSearchCluster, lg logr.Logger) (opensearchv1.OpenSearchHealth, responses.ClusterHealthResponse) {
+	healthResponse := responses.ClusterHealthResponse{}
 	osClient, err := CreateClientForCluster(k8sClient, ctx, cluster, nil)
 	if err != nil {
 		lg.V(1).Info(fmt.Sprintf("Failed to create OS client while checking cluster health: %v", err))
-		return opsterv1.OpenSearchUnknownHealth
+		return opensearchv1.OpenSearchUnknownHealth, healthResponse
 	}
 
-	healthResponse, err := osClient.GetClusterHealth()
+	healthResponse, err = osClient.GetClusterHealth()
 	if err != nil {
 		lg.Error(err, "Failed to get OpenSearch health status")
-		return opsterv1.OpenSearchUnknownHealth
+		return opensearchv1.OpenSearchUnknownHealth, healthResponse
 	}
 
-	return opsterv1.OpenSearchHealth(healthResponse.Status)
+	return opensearchv1.OpenSearchHealth(healthResponse.Status), healthResponse
 }
 
 // GetAvailableOpenSearchNodes returns the sum of ready pods for all node pools
-func GetAvailableOpenSearchNodes(k8sClient k8s.K8sClient, ctx context.Context, cluster *opsterv1.OpenSearchCluster, lg logr.Logger) int32 {
+func GetAvailableOpenSearchNodes(k8sClient k8s.K8sClient, ctx context.Context, cluster *opensearchv1.OpenSearchCluster, lg logr.Logger) int32 {
 	clusterName := cluster.Name
 	clusterNamespace := cluster.Namespace
 
@@ -332,9 +421,119 @@ func GetAvailableOpenSearchNodes(k8sClient k8s.K8sClient, ctx context.Context, c
 		}
 
 		if sts != nil {
+			readyReplicas, err := helpers.ReadyReplicasForNodePool(k8sClient, cluster, &nodePool)
+			if err != nil {
+				lg.V(1).Info(fmt.Sprintf("Failed to count ready pods for nodepool %s: %v", nodePool.Component, err))
+				return previousAvailableNodes
+			}
+			sts.Status.ReadyReplicas = readyReplicas
 			availableNodes += sts.Status.ReadyReplicas
 		}
 	}
 
 	return availableNodes
+}
+
+// PodSpecChanged checks if any meaningful pod spec fields have changed
+func PodSpecChanged(existing, desired *corev1.Pod) bool {
+	existingSpec := existing.Spec
+	desiredSpec := desired.Spec
+
+	sanitizeBootstrapPodSpec(&existingSpec)
+	sanitizeBootstrapPodSpec(&desiredSpec)
+
+	return !apiequality.Semantic.DeepEqual(existingSpec, desiredSpec)
+}
+
+func sanitizeBootstrapPodSpec(spec *corev1.PodSpec) {
+	spec.NodeName = ""
+	spec.Tolerations = removeDefaultNodeLifecycleTolerations(spec.Tolerations)
+}
+
+func removeDefaultNodeLifecycleTolerations(tolerations []corev1.Toleration) []corev1.Toleration {
+	if len(tolerations) == 0 {
+		return tolerations
+	}
+
+	filtered := make([]corev1.Toleration, 0, len(tolerations))
+	for _, tol := range tolerations {
+		if isDefaultNodeLifecycleToleration(tol) {
+			continue
+		}
+		filtered = append(filtered, tol)
+	}
+	return filtered
+}
+
+func isDefaultNodeLifecycleToleration(t corev1.Toleration) bool {
+	if t.Operator != corev1.TolerationOpExists || t.Effect != corev1.TaintEffectNoExecute {
+		return false
+	}
+
+	if t.TolerationSeconds == nil || *t.TolerationSeconds != 300 {
+		return false
+	}
+
+	return t.Key == "node.kubernetes.io/not-ready" || t.Key == "node.kubernetes.io/unreachable"
+}
+
+// CleanStaleExclusionList removes from the cluster exclude list any node whose pod has already
+// been restarted (updated revision) or no longer exists. Call this when DrainDataNodes or
+// SmartScaler use the exclude list, so that a failed RemoveExcludeNodeHost (e.g. connection
+// refused after DeletePod) gets retried and does not leave nodes permanently excluded.
+func CleanStaleExclusionList(k8sClient k8s.K8sClient, instance *opensearchv1.OpenSearchCluster, osClient *services.OsClusterClient, logger logr.Logger) (ctrl.Result, error) {
+	excluded, err := services.GetExcludedNodeNames(osClient)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(excluded) == 0 {
+		return ctrl.Result{}, nil
+	}
+	for _, name := range excluded {
+		stale, err := isPodStale(k8sClient, instance, name)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !stale {
+			continue
+		}
+		logger.Info("Removing stale allocation exclusion (pod already restarted or gone)", "node", name)
+		ok, err := services.RemoveExcludeNodeHost(osClient, logger, name)
+		if err != nil || !ok {
+			logger.Error(err, "Failed to remove stale exclusion, will retry", "node", name)
+			return ctrl.Result{Requeue: true, RequeueAfter: 10 * time.Second}, nil
+		}
+	}
+	return ctrl.Result{}, nil
+}
+
+// isPodStale returns true if the named pod should no longer be in the exclude list:
+// the pod does not exist, or it belongs to our cluster and has the updated revision (already restarted).
+func isPodStale(k8sClient k8s.K8sClient, instance *opensearchv1.OpenSearchCluster, podName string) (bool, error) {
+	pod, err := k8sClient.GetPod(podName, instance.Namespace)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	for i := range instance.Spec.NodePools {
+		np := instance.Spec.NodePools[i]
+		sts, err := k8sClient.GetStatefulSet(builders.StsName(instance, &np), instance.Namespace)
+		if err != nil {
+			return false, err
+		}
+		replicas := ptr.Deref(sts.Spec.Replicas, 1)
+		for ord := int32(0); ord < replicas; ord++ {
+			if helpers.ReplicaHostName(sts, ord) != podName {
+				continue
+			}
+			rev, ok := pod.Labels["controller-revision-hash"]
+			if !ok {
+				return false, fmt.Errorf("pod %s has no controller-revision-hash label", podName)
+			}
+			return rev == sts.Status.UpdateRevision, nil
+		}
+	}
+	return true, nil
 }

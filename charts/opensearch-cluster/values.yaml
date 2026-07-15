@@ -2,6 +2,9 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
+# -- API group for OpenSearch CRDs. Use "opensearch.org" (recommended) or "opensearch.opster.io" (legacy)
+apiGroup: opensearch.org
+
 nameOverride: ""
 fullnameOverride: ""
 
@@ -15,18 +18,18 @@ serviceAccount:
   # -- Service Account annotations
   annotations: {}
 
-# OpenSearchCluster configuration
+# cluster configuration
 cluster:
-  # -- OpenSearchCluster name, by default release name is used
+  # -- cluster name, by default release name is used
   name: ""
 
-  # -- OpenSearchCluster annotations
+  # -- cluster annotations
   annotations: {}
 
-  # -- OpenSearchCluster labels
+  # -- cluster labels
   labels: {}
 
-  # OpenSearchCluster general configuration
+  # cluster general configuration
   general:
     # -- Extra items to add to the opensearch.yml
     additionalConfig: {}
@@ -53,6 +56,13 @@ cluster:
     # -- Default image pull secret
     # imagePullSecrets: []
 
+    # -- Optional custom URL for operator to communicate with OpenSearch
+    # This is useful when using external certificates (e.g., from cert-manager)
+    # that are valid for a specific FQDN. The operator will use this URL
+    # instead of the default internal Kubernetes service DNS name.
+    operatorClusterURL: ""
+#      "opensearch.example.com"
+
     # -- Populate opensearch keystore before startup
     keystore: []
 #      - secret:
@@ -63,10 +73,13 @@ cluster:
 #          # Only read "sensitive-value" from the secret, keep its name.
 #          sensitive-value: sensitive-value
 
-    # Monitoring configuration. Check [documentation](https://github.com/Opster/opensearch-k8s-operator/blob/main/docs/userguide/main.md#adding-opensearch-monitoring-to-your-cluster) how to configure it.
+    # Monitoring configuration. Check [documentation](https://github.com/opensearch-project/opensearch-k8s-operator/blob/main/docs/userguide/main.md#adding-opensearch-monitoring-to-your-cluster) how to configure it.
     monitoring:
       # -- Enable cluster monitoring
       enable: false
+
+      # -- Additional labels to apply to the generated ServiceMonitor
+      labels: {}
 
       # -- Secret with 'username' and 'password' keys for monitoring user. You could also use OpenSearchUser CRD instead of setting it.
       monitoringUserSecret: ""
@@ -80,6 +93,9 @@ cluster:
       # -- Override the tlsConfig of the generated ServiceMonitor
       tlsConfig: {}
 #        insecureSkipVerify: true
+
+    # Enables host networking for all pods in the cluster.
+    hostNetwork: false
 
     # -- List of Opensearch plugins to install
     pluginsList: []
@@ -111,12 +127,16 @@ cluster:
     vendor: Opensearch
 
     # -- Opensearch version
-    version: 2.3.0
+    version: ""
 
-  # OpenSearchCluster boostrap pod configuration
+    # -- OpenSearch installation directory inside the container.
+    # If not set, defaults to /usr/share/opensearch.
+    # opensearchHome: "/usr/share/opensearch"
+
+  # cluster boostrap pod configuration
   bootstrap:
-    # -- bootstrap additional configuration, key-value pairs that will be added to the opensearch.yml configuration
-    additionalConfig: {}
+    # -- bootstrap pod env variables
+    env: []
 
     # -- bootstrap pod affinity rules
     affinity: {}
@@ -137,12 +157,12 @@ cluster:
     # -- bootstrap pod tolerations
     tolerations: []
 
-  # OpenSearchCluster additional services
+  # cluster additional services
   confMgmt:
     # -- Enable nodes to be safely removed from the cluster
-    smartScaler: false
+    smartScaler: true
 
-  # OpenSearchCluster dashboards configuration
+  # cluster dashboards configuration
   dashboards:
     # -- Additional properties for opensearch_dashboards.yaml
     additionalConfig: {}
@@ -152,6 +172,9 @@ cluster:
 
     # -- dashboards annotations
     annotations: {}
+
+    # -- dashboards pod topologySpreadConstraints
+    topologySpreadConstraints: []
 
     # -- dashboards Base Path for Opensearch Clusters running behind a reverse proxy
     basePath: ""
@@ -220,17 +243,25 @@ cluster:
       secret:
         # name: "
 
+      # -- Duration controls the validity period of generated certificates (e.g. "8760h", "720h").
+      # This is used only when generate is true.
+      duration: "8760h"
+
     # -- dashboards pod tolerations
     tolerations: []
 
     # -- dashboards version
-    version: 2.3.0
+    version: ""
+
+    # -- OpenSearch Dashboards installation directory inside the container.
+    # If not set, defaults to /usr/share/opensearch-dashboards.
+    # opensearchDashboardsHome: "/usr/share/opensearch-dashboards"
 
   # initHelper configuration
   initHelper:
     # -- initHelper image
     image: docker.io/busybox
-    
+
     # -- initHelper image pull policy
     imagePullPolicy: "IfNotPresent"
 
@@ -248,6 +279,9 @@ cluster:
     - component: masters
       # -- node pool pod annotations
       annotations: {}
+      # -- Extra items to add to opensearch.yml for this specific nodepool (merged with general.additionalConfig)
+      additionalConfig: {}
+
       diskSize: "30Gi"
       replicas: 3
       roles:
@@ -260,6 +294,49 @@ cluster:
         limits:
           memory: "2Gi"
           cpu: "500m"
+      # -- Per-nodePool ingress configuration. Creates a separate Ingress targeting this nodePool's service.
+      ingress:
+        enabled: false
+      #   annotations: {}
+      #   className: ""
+      #   hosts:
+      #     - host: opensearch-data.example.com
+      #       paths:
+      #         - path: /
+      #           pathType: ImplementationSpecific
+      #   tls: []
+      #     - hosts:
+      #         - opensearch-data.example.com
+      #       secretName: tls-secret
+
+      # -- These containers will be deployed as sidecars in the same pod as the OpenSearch container
+      sidecarContainers: []
+      # Example configurations:
+      # - name: log-shipper
+      #   image: fluent/fluent-bit:latest
+      #   resources:
+      #     requests:
+      #       memory: "64Mi"
+      #       cpu: "100m"
+      #     limits:
+      #       memory: "128Mi"
+      #       cpu: "200m"
+      #   volumeMounts:
+      #     - name: varlog
+      #       mountPath: /var/log
+      #       readOnly: true
+      # - name: metrics-collector
+      #   image: prom/node-exporter:latest
+      #   ports:
+      #     - containerPort: 9100
+      #       name: metrics
+      #   resources:
+      #     requests:
+      #       memory: "32Mi"
+      #       cpu: "50m"
+      #     limits:
+      #       memory: "64Mi"
+      #       cpu: "100m"
 
   # Opensearch security configuration
   security:
@@ -270,7 +347,7 @@ cluster:
 #        name: "secret-name"
 
       # -- TLS Secret that contains a client certificate (tls.key, tls.crt, ca.crt) with admin rights in the opensearch cluster.
-      # Must be set if transport certificates are provided by user and not generated
+      # Must be set if http certificates are provided by user and not generated
       adminSecret: {}
 #       name: "secret-name"
 
@@ -281,6 +358,16 @@ cluster:
     # Configure tls usage for transport and http interface
     tls:
       http:
+        # -- Controls if TLS should be enabled for HTTP.
+        # If false, TLS is explicitly disabled.
+        # If not set (default), TLS is enabled when http configuration is provided.
+        # If true, TLS is explicitly enabled and http configuration must be provided.
+        enabled: ~
+
+        # -- DNs of certificates that should have admin access, mainly used for securityconfig updates via securityadmin.sh,
+        # only used when existing certificates are provided
+        adminDn: []
+
         # -- Optional, secret that contains the ca certificate as ca.crt. If this and generate=true is set the existing
         # CA cert from that secret is used to generate the node certs. In this case must contain ca.crt and ca.key fields
         caSecret: {}
@@ -290,14 +377,35 @@ cluster:
         # if false - secrets with existing certificates must be supplied
         generate: true
 
+        # -- Optional custom FQDN to use for the HTTP certificate. If provided, this FQDN will be used
+        # as the primary DNS name in the certificate's Subject Alternative Names (SAN), along with the
+        # default cluster DNS names. This allows you to use a single certificate that works with both
+        # your custom domain and the internal Kubernetes DNS names.
+        customFQDN: ""
+#            "opensearch.example.com"
+
         # -- Optional, name of a TLS secret that contains ca.crt, tls.key and tls.crt data. If ca.crt is in a
         # different secret provide it via the caSecret field
         secret: {}
 #            name: "secret-name"
 
+        # -- Duration controls the validity period of generated certificates (e.g. "8760h", "720h").
+        # This is used only when generate is true.
+        duration: "8760h"
+
+        # -- Enable hot reloading of TLS certificates.
+        enableHotReload: false
+
       transport:
+        # -- Controls if TLS should be enabled for transport.
+        # If false, TLS is explicitly disabled.
+        # If not set (default), TLS is enabled when transport configuration is provided.
+        # If true, TLS is explicitly enabled and transport configuration must be provided.
+        enabled: ~
+
         # -- DNs of certificates that should have admin access, mainly used for securityconfig updates via securityadmin.sh,
-        # only used when existing certificates are provided
+        # only used when existing certificates are provided. This field is deprecated and will be removed in a future version.
+        # For OpenSearch 2.0.0+, use security.tls.http.adminDn instead.
         adminDn: []
 
         # -- Optional, secret that contains the ca certificate as ca.crt. If this and generate=true is set the existing
@@ -320,6 +428,12 @@ cluster:
         secret: {}
 #            name: "secret-name"
 
+        # -- Duration controls the validity period of generated certificates (e.g. "8760h", "720h").
+        # This is used only when generate is true.
+        duration: "8760h"
+
+        # -- Enable hot reloading of TLS certificates.
+        enableHotReload: false
 
   # Opensearch Ingress configuration
   ingress:
@@ -342,9 +456,9 @@ cluster:
 
       # -- Opensearch tls configuration
       tls: []
-        #- hosts:
-        #   - example.com
-        #  secretName: tls-secret
+        # - hosts:
+        #     - example.com
+        #   secretName: tls-secret
 
     # Dashboards Ingress configuration
     dashboards:
