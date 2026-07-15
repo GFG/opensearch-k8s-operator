@@ -4,18 +4,20 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"github.com/Opster/opensearch-k8s-operator/opensearch-operator/pkg/helpers"
 	"io"
-	"k8s.io/utils/ptr"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/Opster/opensearch-k8s-operator/opensearch-operator/opensearch-gateway/responses"
+	"github.com/opensearch-project/opensearch-k8s-operator/opensearch-operator/pkg/helpers"
+	"k8s.io/utils/ptr"
+
 	"github.com/opensearch-project/opensearch-go"
 	"github.com/opensearch-project/opensearch-go/opensearchapi"
 	"github.com/opensearch-project/opensearch-go/opensearchutil"
+	"github.com/opensearch-project/opensearch-k8s-operator/opensearch-operator/opensearch-gateway/responses"
 )
 
 const (
@@ -49,6 +51,7 @@ type OsClusterClient struct {
 
 type OsClusterClientOptions struct {
 	transport http.RoundTripper
+	tlsConfig *tls.Config
 }
 
 type OsClusterClientOption func(*OsClusterClientOptions)
@@ -65,6 +68,16 @@ func WithTransport(transport http.RoundTripper) OsClusterClientOption {
 	}
 }
 
+// WithTLSConfig configures the underlying HTTP transport with the given TLS
+// configuration. This is the supported way to enable mTLS (client certificate
+// authentication) and/or proper server certificate verification when the
+// operator talks to OpenSearch. Ignored if WithTransport is also supplied.
+func WithTLSConfig(tlsConfig *tls.Config) OsClusterClientOption {
+	return func(o *OsClusterClientOptions) {
+		o.tlsConfig = tlsConfig
+	}
+}
+
 func NewOsClusterClient(clusterUrl string, username string, password string, opts ...OsClusterClientOption) (*OsClusterClient, error) {
 	options := OsClusterClientOptions{}
 	options.apply(opts...)
@@ -73,8 +86,22 @@ func NewOsClusterClient(clusterUrl string, username string, password string, opt
 			if options.transport != nil {
 				return options.transport
 			}
+			tlsCfg := options.tlsConfig
+			if tlsCfg == nil {
+				tlsCfg = &tls.Config{InsecureSkipVerify: true}
+			}
 			return &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				TLSClientConfig: tlsCfg,
+				// Bound every phase of a request so that an unresponsive endpoint
+				// (e.g. a node that died without closing connections, or a wedged
+				// load balancer) cannot block a reconcile worker indefinitely.
+				// GetClusterHealth's Timeout parameter is a server-side master
+				// timeout and does not protect the client.
+				DialContext: (&net.Dialer{
+					Timeout: 5 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
 				// These options are needed as otherwise connections would be kept and leak memory
 				// Connection reuse is not really possible due to each reconcile run being independent
 				DisableKeepAlives: true,
@@ -200,6 +227,30 @@ func (client *OsClusterClient) CatNamedIndicesShards(headers []string, indices [
 	return response, err
 }
 
+// GetAllocationExplain explains why a shard is or isn't allocated
+func (client *OsClusterClient) GetAllocationExplain(index string, shard int, primary bool) (responses.AllocationExplainResponse, error) {
+	body := map[string]interface{}{
+		"index":   index,
+		"shard":   shard,
+		"primary": primary,
+	}
+	bodyReader := opensearchutil.NewJSONReader(body)
+	req := opensearchapi.ClusterAllocationExplainRequest{Body: bodyReader}
+	explainRes, err := req.Do(context.Background(), client.client)
+	if err != nil {
+		return responses.AllocationExplainResponse{}, err
+	}
+	defer helpers.SafeClose(explainRes.Body)
+
+	if explainRes.IsError() {
+		return responses.AllocationExplainResponse{}, ErrClusterAllocationExplainGetFailed(explainRes.String())
+	}
+
+	var response responses.AllocationExplainResponse
+	err = json.NewDecoder(explainRes.Body).Decode(&response)
+	return response, err
+}
+
 func (client *OsClusterClient) GetClusterSettings() (responses.ClusterSettingsResponse, error) {
 	req := opensearchapi.ClusterGetSettingsRequest{Pretty: true}
 	settingsRes, err := req.Do(context.Background(), client.client)
@@ -208,6 +259,11 @@ func (client *OsClusterClient) GetClusterSettings() (responses.ClusterSettingsRe
 		return response, err
 	}
 	defer helpers.SafeClose(settingsRes.Body)
+
+	if settingsRes.IsError() {
+		return response, ErrClusterSettingsGetFailed(settingsRes.String())
+	}
+
 	err = json.NewDecoder(settingsRes.Body).Decode(&response)
 	return response, err
 }
@@ -224,7 +280,7 @@ func (client *OsClusterClient) GetFlatClusterSettings() (responses.FlatClusterSe
 	defer helpers.SafeClose(settingsRes.Body)
 
 	if settingsRes.IsError() {
-		return response, ErrClusterHealthGetFailed(settingsRes.String())
+		return response, ErrClusterSettingsGetFailed(settingsRes.String())
 	}
 
 	err = json.NewDecoder(settingsRes.Body).Decode(&response)
@@ -240,6 +296,11 @@ func (client *OsClusterClient) PutClusterSettings(settings responses.ClusterSett
 		return response, err
 	}
 	defer helpers.SafeClose(settingsRes.Body)
+
+	if settingsRes.IsError() {
+		return response, ErrClusterSettingsPutFailed(settingsRes.String())
+	}
+
 	err = json.NewDecoder(settingsRes.Body).Decode(&response)
 	return response, err
 }

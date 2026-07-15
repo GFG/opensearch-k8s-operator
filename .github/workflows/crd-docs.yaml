@@ -1,0 +1,35 @@
+name: CRD Docs
+on:
+  pull_request:
+    paths:
+      - 'opensearch-operator/api/**'
+      - 'docs/designs/crd.md'
+      - 'docs/designs/crd/**'
+      - 'docs/designs/crd-ref-docs-config.yaml'
+      - 'opensearch-operator/Makefile'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  crd-docs:
+    name: crd docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: 'go.work'
+          cache: false
+      - name: Generate CRD docs
+        working-directory: ./opensearch-operator
+        run: |
+          make docs
+      - name: Check if docs are up to date
+        run: |
+          if ! git diff --exit-code --quiet docs/designs/crd.md docs/designs/crd/; then
+            echo "CRD docs are out of date. Please run 'make docs' in the opensearch-operator directory and commit the changes."
+            exit 1
+          fi
