@@ -68,6 +68,9 @@ jobs:
         run: |
           gcloud auth configure-docker europe-west1-docker.pkg.dev
 
+      - name: Copy LICENSE into build context
+        run: cp LICENSE opensearch-operator/LICENSE
+
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
