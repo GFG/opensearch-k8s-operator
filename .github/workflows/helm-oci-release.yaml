@@ -1,0 +1,72 @@
+name: Release Helm Chart
+
+on:
+  push:
+    paths:
+      - 'charts/**'
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      chart:
+        description: 'Chart to release'
+        required: true
+        type: choice
+        options:
+          - opensearch-operator
+          - opensearch-cluster
+        default: opensearch-operator
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  changed-files:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    outputs:
+      charts: ${{ steps.filter-chart-paths.outputs.charts }}
+      any_changed: ${{ steps.changed-files.outputs.any_changed }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v46.0.1
+        with:
+          files: |
+            charts/**
+          json: true
+
+      - name: Filter chart paths
+        id: filter-chart-paths
+        env:
+          ALL_CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+        run: |
+          CHANGED_FILES="$ALL_CHANGED_FILES"
+          CHARTS=$(echo "$CHANGED_FILES" | sed 's/\\"/"/g' | jq -r '.[]' | grep -o 'charts/[^/]*' | sort -u | sed 's|charts/||')
+          echo "charts=[\"$(echo "$CHARTS" | tr '\n' ' ' | sed 's/ $//' | sed 's/ /","/g')\"]" >> "$GITHUB_OUTPUT"
+
+  release-helm-auto:
+    needs: [changed-files]
+    if: ${{ github.event_name == 'push' && needs.changed-files.outputs.any_changed == 'true' }}
+    strategy:
+      matrix:
+        chart: ${{ fromJson(needs.changed-files.outputs.charts) }}
+    uses: GFG/datajet-github-workflows/.github/workflows/gcp-oci-release.yaml@latest
+    with:
+      chart_path: './charts/${{ matrix.chart }}'
+      registry: 'us-east4-docker.pkg.dev'
+    secrets: inherit
+
+  release-helm-manual:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    uses: GFG/datajet-github-workflows/.github/workflows/gcp-oci-release.yaml@latest
+    with:
+      chart_path: './charts/${{ inputs.chart }}'
+      registry: 'us-east4-docker.pkg.dev'
+    secrets: inherit
