@@ -15,17 +15,16 @@ env:
 
 jobs:
   docker-build-push:
-    runs-on: dj-arc-runner-set
-    container:
-      image: us-east4-docker.pkg.dev/datajet-platform/datajet-platform-useast4-docker-gcr/go-lang-ci:latest
-      options: --pull=missing
+    # The Go toolchain lives inside the Dockerfile's builder stage, so the runner
+    # only needs docker, buildx and gcloud -- all present on ubuntu-latest.
+    runs-on: ubuntu-latest
     name: Docker Build Push
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up GCP auth
-        uses: 'google-github-actions/auth@v2'
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: 'projects/221333776893/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
           service_account: 'github-actions-sa@datajet-platform.iam.gserviceaccount.com'
@@ -33,26 +32,21 @@ jobs:
           export_environment_variables: true
 
       - name: Set up Cloud SDK
-        uses: 'google-github-actions/setup-gcloud@v2'
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
         with:
           version: '>= 363.0.0'
           install_components: 'docker-credential-gcr'
 
-      - name: Gcloud configure docker for us-east4-docker.pkg.dev
-        run: |
-          gcloud auth configure-docker us-east4-docker.pkg.dev
-      
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          image: us-east4-docker.pkg.dev/datajet-platform/dockerhub-proxy/tonistiigi/binfmt:latest
-      
+      # No QEMU: the builder stage is pinned to $BUILDPLATFORM and Go cross-compiles
+      # via GOOS/GOARCH, and the runtime stage has no RUN. Nothing ever executes at
+      # the target architecture, so binfmt emulation is not needed for either platform.
+
       - name: Extract metadata for Server
         id: meta-server
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.SERVER_IMAGE }}
           tags: |
@@ -72,7 +66,8 @@ jobs:
         run: cp LICENSE opensearch-operator/LICENSE
 
       - name: Build and push
-        uses: docker/build-push-action@v5
+        id: build
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: ./opensearch-operator
           file: ./opensearch-operator/Dockerfile
@@ -80,9 +75,13 @@ jobs:
           tags: ${{ steps.meta-server.outputs.tags }}
           labels: ${{ steps.meta-server.outputs.labels }}
           cache-from: type=registry,ref=${{ env.SERVER_IMAGE }}:buildcache
-          cache-to: type=registry,ref=${{ env.SERVER_IMAGE }}:buildcache,mode=max
+          # Pull requests read the shared cache but must not write to it, otherwise
+          # a PR build could poison the cache that main later builds from.
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}:buildcache,mode=max', env.SERVER_IMAGE) || '' }}
           platforms: linux/amd64,linux/arm64
 
       - name: Image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          echo "Server Image Digest: ${{ steps.meta-server.outputs.digest }}"
+          echo "Server Image Digest: ${DIGEST:-<not pushed>}"
