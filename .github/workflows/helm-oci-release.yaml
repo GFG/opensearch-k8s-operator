@@ -22,6 +22,9 @@ env:
 
 jobs:
   release:
+    # workflow_dispatch can target any ref; without this guard a branch could
+    # mint an OIDC token for the GCP service account.
+    if: github.ref == 'refs/heads/main'
     runs-on: dj-arc-runner-set
     container:
       image: us-east4-docker.pkg.dev/datajet-platform/datajet-platform-useast4-docker-gcr/go-lang-ci:latest
