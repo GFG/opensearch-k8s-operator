@@ -531,7 +531,7 @@ func NewSTSForNodePool(
 	if helpers.ContainsString(helpers.MapClusterRoles(node.Roles, cr.Spec.General.Version), masterRole) {
 		policyPodManagement = appsv1.OrderedReadyPodManagement
 	}
-	
+
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        cr.Name + "-" + node.Component,
