@@ -80,7 +80,7 @@ type GeneralConfig struct {
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
 	// Set the retention policy for the cluster PVCs
 	PersistentVolumeClaimRetentionPolicy *appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy `json:"persistentVolumeClaimRetentionPolicy,omitempty"`
-	HostAliases     []corev1.HostAlias      `json:"hostAliases,omitempty"`
+	HostAliases                          []corev1.HostAlias                                      `json:"hostAliases,omitempty"`
 	// Operator cluster URL. If set, the operator will use this URL to communicate with OpenSearch
 	// instead of the default internal Kubernetes service DNS name.
 	OperatorClusterURL *string `json:"operatorClusterURL,omitempty"`

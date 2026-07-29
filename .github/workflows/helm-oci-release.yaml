@@ -1,0 +1,71 @@
+name: Release Helm Charts (OCI)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'charts/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  REGISTRY: us-east4-docker.pkg.dev
+  OCI_REPO: oci://us-east4-docker.pkg.dev/datajet-platform/datajet-platform-helm-repo
+
+jobs:
+  release:
+    # workflow_dispatch can target any ref; without this guard a branch could
+    # mint an OIDC token for the GCP service account.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: 'projects/221333776893/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-actions-sa@datajet-platform.iam.gserviceaccount.com'
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+        with:
+          version: '>= 363.0.0'
+
+      - name: Log in to the OCI registry
+        run: |
+          gcloud auth print-access-token \
+            | helm registry login -u oauth2accesstoken --password-stdin "$REGISTRY"
+
+      - name: Package and push charts
+        run: |
+          set -euo pipefail
+          for dir in charts/*/; do
+            [ -f "${dir}Chart.yaml" ] || continue
+
+            name=$(awk '$1 == "name:" { print $2; exit }' "${dir}Chart.yaml")
+            version=$(awk '$1 == "version:" { print $2; exit }' "${dir}Chart.yaml")
+
+            if helm show chart "${OCI_REPO}/${name}" --version "${version}" >/dev/null 2>&1; then
+              echo "skip ${name}-${version}: already published"
+              continue
+            fi
+
+            echo "publishing ${name}-${version}"
+            helm package "${dir}"
+            helm push "${name}-${version}.tgz" "${OCI_REPO}"
+          done
